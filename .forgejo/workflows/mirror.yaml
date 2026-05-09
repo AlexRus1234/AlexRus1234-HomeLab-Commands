@@ -1,0 +1,56 @@
+name: Зеркалирование Команд к видео
+
+# Срабатывает при каждом пуше в основную ветку
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  sync-mirrors:
+    runs-on: docker
+    container:
+      # Используем сверхлегкий контейнер с Git
+      image: docker.io/alpine/git:latest
+    
+    steps:
+      - name: Настройка безопасности и клонирование
+        run: |
+          echo "=== Загружаем корневой сертификат нашего CA (Step-CA) ==="
+          # Качаем публичный ключ доверия с нашего роутера
+          wget --no-check-certificate https://172.20.0.1:9000/roots.pem -O /tmp/step-ca.crt
+          
+          echo "=== Настраиваем Git на доверие к нашей локальной сети ==="
+          # Говорим Git проверять HTTPS-соединения по нашему сертификату
+          git config --global http.sslCAInfo /tmp/step-ca.crt
+          
+          echo "=== Скачиваем код с домашнего сервера ==="
+          # Клонируем репозиторий в текущую папку (точка в конце обязательна)
+          git clone ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git .
+          echo "=== Возвращаем стандартные сертификаты для остального интернета! ==="
+          git config --global --unset http.sslCAInfo
+
+      - name: Отправка на GitHub
+        continue-on-error: true
+        env:
+          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+        run: |
+          echo "Синхронизация с GitHub..."
+          git push --force https://AlexRus1234:${TOKEN_GITHUB}@github.com/AlexRus1234/AlexRus1234-HomeLab-Commands.git HEAD:main
+
+      - name: Отправка на Mos.Hub
+        continue-on-error: true
+        env:
+          TOKEN_MOSHUB: ${{ secrets.TOKEN_MOSHUB }}
+        run: |
+          echo "Синхронизация с Mos.Hub..."
+          git -c http.sslVerify=false push --force https://AlexRus1234:${TOKEN_MOSHUB}@hub.mos.ru/AlexRus1234/AlexRus1234-HomeLab-Commands.git HEAD:main
+
+      - name: Отправка на Codeberg
+        continue-on-error: true
+        env:
+          TOKEN_CODEBERG: ${{ secrets.TOKEN_CODEBERG }}
+        run: |
+          echo "Синхронизация с Codeberg..."
+          git push --force https://AlexRus1234:${TOKEN_CODEBERG}@codeberg.org/AlexRus1234/AlexRus1234-HomeLab-Commands.git HEAD:main

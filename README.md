@@ -1,0 +1,41 @@
+
+
+
+# 🛠 AlexRus1234 HomeLab: 
+
+> ⚠️ **ВНИМАНИЕ:**  Оригинальный исходный код, все скрипты и история коммитов хранятся на моем личном сервере: **[git.alexrus1234.ru/AlexRus1234/AlexRus1234-HomeLab-Commands](https://git.alexrus1234.ru/AlexRus1234/AlexRus1234-HomeLab-Commands)**.
+> *Если вы читаете этот текст на GitHub, Mos.Hub или Codeberg — это автоматическое зеркало, которое обновляется моим домашним CI/CD Раннером.*
+
+Добро пожаловать!
+ 
+Здесь собраны все скрипты, настройки и пошаговые команды из моих видео.
+
+
+## 📁 Структура репозитория
+
+Папки в репозитории соответствуют нумерации выпусков на канале. Внутри каждой папки вы найдете файлы (например, `commands.md` или `config.yaml`), содержащие всё необходимое для повторения материала:
+
+* 📂 **1** — Сборка NAS на ZFS (Arch Linux)
+* 📂 **2** — Архивация данных на магнитную ленту (LTO-4 / LTO-5)
+* 📂 **3.1 / 3.2** — Создание NGFW Роутера (DPI, IPS, CAKE-шейпинг, nftables)
+* 📂 **4** — Автоматизация Proxmox, свой PKI (Step-CA) и Caddy Reverse Proxy
+* 📂 **5** — P2P VPN шлюз на VPS (Headscale, CrowdSec, Endlessh)
+* 📂 **6** — Повседневные self-hosted сервисы (Vaultwarden, Paperless, Actual Budget)
+* 📂 **7 / 7.1** — Второй сервер, прямые L3-линки и Proxmox Backup Server (PBS)
+* 📂 **8** — Базы данных на NAS Bare Metal (PostgreSQL, MongoDB, RUSTFS, Valkey)
+* 📂 **9** — Суверенный мессенджер Matrix (Synapse +  Bridges)
+* 📂 **10** — Единая точка входа SSO (Authentik) и переход на Rootless Podman (Quadlets)
+* 📂 **11** — Свой Git-сервер (Forgejo) и CI/CD фабрика автоматизации
+
+
+## 🚀 Как скачать все скрипты к себе
+
+Для загрузки всех материалов на ваш компьютер, выполните в терминале команду:
+```bash
+git clone https://git.alexrus1234.ru/AlexRus1234/AlexRus1234-HomeLab-Commands.git
+```
+
+## 🔗 Полезные ссылки
+
+* 📢 [Мой Telegram-канал](https://t.me/AlexRus1234Chanel) (Анонсы и обсуждения)
+* 🔵 [Группа ВКонтакте](https://vk.com/club195345569)

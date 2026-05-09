@@ -1,0 +1,562 @@
+
+---
+
+
+#  Развертывание сервиса Forgejo
+
+## Этап 1. Подготовка базы данных и среды виртуализации (LXC)
+
+Архитектура предполагает разделение вычислительного узла (Forgejo) и узла хранения (СУБД/NAS) для оптимизации процессов резервного копирования.
+
+0. На сервере баз данных (PostgreSQL) создайте роль и базу данных:
+```sql
+sudo -u postgres psql  
+CREATE USER forgejo WITH PASSWORD '<ВАШ_ПАРОЛЬ_БД>'; 
+CREATE DATABASE forgejo OWNER forgejo;
+\q  
+```
+
+1. В гипервизоре Proxmox VE создайте контейнер со следующими параметрами:
+   * **Тип:** Unprivileged (Непривилегированный).
+   * **Шаблон ОС:** `archlinux`.
+   * **Root Disk:** 8 GB.
+   * **CPU / RAM:** 2 vCPU, 1024 MB RAM.
+   * **Сеть:** Статический IPv4 (например, `192.168.1.20/24`), корректный шлюз.
+2. **Не инициируйте запуск контейнера.**
+3. Перейдите в параметры контейнера: **Resources** -> **Add** -> **Mount Point**.
+   * **Storage:** Целевое хранилище.
+   * **Disk size:** Требуемый объем (например, 50 GB).
+   * **Path:** `/var/lib/forgejo`.
+   * **Backup:** Активировано.
+4. Запустите контейнер и откройте консоль.
+
+---
+
+## Этап 2. Базовая конфигурация ОС (Arch Linux)
+
+Для корректной работы пакетного менеджера в непривилегированном LXC необходимо отключить изоляцию (sandbox).
+
+Откройте конфигурационный файл:
+```bash
+nano /etc/pacman.conf
+```
+В секции `[options]` раскомментируйте параметр:
+```ini
+DisableSandbox
+```
+
+Выполните инициализацию ключей и обновление системы:
+```bash
+pacman-key --init
+pacman-key --populate archlinux
+pacman -Sy archlinux-keyring --noconfirm
+pacman -Syu
+```
+
+Установите требуемые пакеты:
+```bash
+pacman -S forgejo nano nftables openssh
+```
+
+Назначьте права на смонтированную директорию (игнорируйте предупреждения системного каталога `lost+found` при их наличии):
+```bash
+chown forgejo:forgejo /var/lib/forgejo
+```
+
+---
+
+## Этап 3. Конфигурация портов SSH
+
+Для обеспечения доступа к Git по стандартному порту `22` необходимо переназначить порт системного SSH-демона и настроить перенаправление трафика.
+
+**1. Переназначение порта системного SSH:**
+```bash
+nano /etc/ssh/sshd_config
+```
+Измените параметр `#Port 22` на `Port 22224`.
+Перезапустите службу: `systemctl restart sshd`.
+
+**2. Настройка перенаправления портов (nftables):**
+Служба Forgejo будет прослушивать порт `2222`. Межсетевой экран обеспечит трансляцию входящего трафика с порта `22` на `2222`.
+```bash
+cat << 'EOF' > /etc/nftables.conf
+flush ruleset
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        tcp dport 22 redirect to :2222
+    }
+}
+EOF
+
+systemctl enable --now nftables
+```
+
+**3. Интеграция корневого сертификата (Root CA):**
+Добавьте публичный сертификат внутреннего удостоверяющего центра:
+```bash
+nano /etc/ca-certificates/trust-source/anchors/step-ca.crt
+```
+Обновите хранилище доверенных сертификатов:
+```bash
+update-ca-trust
+```
+
+---
+
+## Этап 4. Первичная инициализация Forgejo
+
+Инициализация структуры базы данных выполняется через графический инсталлятор.
+
+1. Запустите службу:
+   ```bash
+   systemctl enable --now forgejo
+   ```
+2. Откройте в веб-браузере адрес: `http://192.168.1.20:3000`
+3. **Параметры инсталлятора:**
+   * СУБД: `PostgreSQL` (Укажите хост, пользователя и пароль).
+   * **Путь до каталога репозиториев:** `/var/lib/forgejo/repos`.
+   * **Путь журналов:** `/var/lib/forgejo/log`.
+   * **Учетная запись администратора:** Обязательно создайте первичного пользователя.
+4. Нажмите **"Установить Forgejo"**. 
+
+*Примечание: При ошибке прав доступа выполните команду `chown -R forgejo:forgejo /etc/forgejo` и повторите попытку.*
+
+---
+
+## Этап 5. Конфигурация приложения (app.ini)
+
+Для интеграции с S3-хранилищем, сервисом кэширования Valkey и корректной обработки доменов необходимо внести изменения в основной конфигурационный файл.
+
+Откройте файл:
+```bash
+nano /etc/forgejo/app.ini
+```
+
+Замените содержимое на следующий шаблон, указав актуальные учетные данные и сетевые адреса:
+
+```ini
+APP_NAME = Forgejo Server
+RUN_USER = forgejo
+RUN_MODE = prod
+WORK_PATH = /var/lib/forgejo
+APP_SLOGAN = Beyond coding. We Forge.
+
+[server]
+PROTOCOL = http
+DOMAIN = git.internal.example.com
+HTTP_PORT = 3000
+ROOT_URL = https://git.internal.example.com/
+START_SSH_SERVER = true
+SSH_LISTEN_PORT = 2222
+SSH_DOMAIN = git.internal.example.com
+SSH_PORT = 22
+APP_DATA_PATH = /var/lib/forgejo
+DISABLE_SSH = false
+OFFLINE_MODE = true
+LFS_START_SERVER = true
+USE_X_FORWARDED_HOST = true
+PUBLIC_URL_DETECTION = auto
+
+[database]
+DB_TYPE = postgres
+HOST = <IP_БД>:5432
+NAME = forgejo
+USER = forgejo
+PASSWD = <ВАШ_ПАРОЛЬ_БД>
+SSL_MODE = disable
+LOG_SQL = false
+
+[cache]
+ADAPTER = redis
+HOST = redis://:<ПАРОЛЬ_VALKEY>@<IP_VALKEY>:6379/0
+
+[session]
+PROVIDER = redis
+PROVIDER_CONFIG = redis://:<ПАРОЛЬ_VALKEY>@<IP_VALKEY>:6379/1
+
+[storage]
+STORAGE_TYPE = minio
+MINIO_ENDPOINT = <IP_MINIO>:9000
+MINIO_ACCESS_KEY_ID = <MINIO_ACCESS_KEY>
+MINIO_SECRET_ACCESS_KEY = <MINIO_SECRET_KEY>
+MINIO_BUCKET = forgejo-data
+MINIO_USE_SSL = false
+
+[service]
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW = false
+DEFAULT_KEEP_EMAIL_PRIVATE = true
+DEFAULT_ALLOW_CREATE_ORGANIZATION = true
+
+[openid]
+ENABLE_OPENID_SIGNIN = true
+ENABLE_OPENID_SIGNUP = false
+
+[repository]
+ROOT = /var/lib/forgejo/repos
+
+[log]
+MODE = console
+LEVEL = info
+ROOT_PATH = /var/lib/forgejo/log
+
+[security]
+INSTALL_LOCK = true
+PASSWORD_HASH_ALGO = pbkdf2_hi
+REVERSE_PROXY_TRUSTED_PROXIES = <IP_ПОДСЕТИ_ПРОКСИ>/16
+```
+
+Ограничьте права доступа к конфигурационному файлу:
+```bash
+chown forgejo:forgejo /etc/forgejo/app.ini
+chmod 600 /etc/forgejo/app.ini
+systemctl restart forgejo
+```
+
+---
+
+## Этап 6. Настройка обратного прокси-сервера (Caddy)
+
+Конфигурация предусматривает маршрутизацию для внутреннего домена (с локальным TLS) и внешнего публичного домена.
+
+Внесите изменения в `Caddyfile`:
+
+```caddy
+# Внутренний домен
+git.internal.example.com {
+    reverse_proxy 192.168.1.20:3000 {
+        header_up X-Forwarded-Host git.internal.example.com
+    }
+    import my_tls 
+}
+
+# Внешний домен
+git.example.com {
+    # Блокировка POST-запросов к форме локальной авторизации извне
+    @block_login {
+        method POST
+        path /user/login
+    }
+    respond @block_login "Local login is disabled for external users. Use SSO." 403
+
+    reverse_proxy 192.168.1.20:3000 {
+        header_up X-Forwarded-Host git.example.com
+    }
+}
+```
+Примените конфигурацию перезапуском службы Caddy.
+
+---
+
+## Этап 7. Интеграция Single Sign-On (Authentik)
+
+Для реализации единой точки входа (SSO) настройте OIDC-интеграцию.
+
+1. В панели управления **Authentik** создайте провайдер (OAuth2/OpenID) и добавьте `Redirect URI`:
+   `https://git.internal.example.com/user/oauth2/Authentik/callback`
+   `https://git.example.com/user/oauth2/Authentik/callback`
+2. Авторизуйтесь в **Forgejo** под учетной записью администратора.
+3. Перейдите в раздел **Администрирование** -> **Идентификация и доступ** -> **Источники аутентификации**.
+4. Добавьте тип **OAuth2 (OpenID Connect)**.
+5. Заполните поле **Discovery URL** (пример):
+   `https://auth.internal.example.com/application/o/forgejo/.well-known/openid-configuration`
+6. Завершите сессию. На странице авторизации нажмите кнопку входа через Authentik. При перенаправлении выберите опцию привязки к существующему аккаунту и введите локальные учетные данные администратора.
+
+Перезапустите службу: `systemctl restart forgejo`.
+
+***
+
+# Документ 3: Настройка Forgejo Runner в виртуальной среде
+
+В целях обеспечения безопасности CI/CD процессы выполняются на изолированной виртуальной машине (KVM) в пространстве пользователя (Rootless Podman), что предотвращает компрометацию хоста при выполнении произвольного кода пайплайнов.
+
+---
+
+## Этап 1. Подготовка виртуальной машины
+
+Используйте базовую установку Arch Linux. Выполняйте действия от имени суперпользователя (`root`).
+
+### 1. Добавление корневого сертификата в доверенные
+Для корректного взаимодействия Runner по протоколу HTTPS с сервером Forgejo требуется установка сертификата удостоверяющего центра.
+
+```bash
+nano /etc/ca-certificates/trust-source/anchors/step-ca.crt
+```
+Вставьте данные сертификата и обновите хранилище:
+```bash
+update-ca-trust
+```
+
+### 2. Конфигурация DNS (systemd-networkd)
+Виртуальная машина должна осуществлять резолвинг внутренних доменных имен.
+
+Откройте конфигурацию сетевого интерфейса:
+```bash
+nano /etc/systemd/network/10-ens18.network
+```
+Убедитесь в наличии параметров DNS:
+```ini
+[Network]
+DHCP=yes
+DNS=<IP_ЛОКАЛЬНОГО_DNS>
+Domains=~internal
+```
+Перезапустите сетевой стек:
+```bash
+systemctl restart systemd-networkd systemd-resolved
+```
+
+---
+
+## Этап 2. Установка компонентов и настройка системного пользователя
+
+### 1. Установка пакетов
+```bash
+pacman -Syu podman forgejo-runner --noconfirm
+```
+
+### 2. Настройка Rootless-окружения
+Активируйте системного пользователя `forgejo-runner` для запуска фоновых процессов и управления контейнерами.
+
+```bash
+# Назначение оболочки, рабочей директории и выделение пула subuid/subgid
+usermod -s /bin/bash -d /var/lib/forgejo-runner --add-subuids 100000-165535 --add-subgids 100000-165535 forgejo-runner
+
+# Разблокировка учетной записи (модуль PAM)
+chage -E -1 forgejo-runner
+
+# Включение функции Linger для сохранения процессов пользователя после завершения сессии
+loginctl enable-linger forgejo-runner
+```
+
+---
+
+## Этап 3. Инициализация сессии пользователя
+
+Используйте `machinectl` для создания полноценной пользовательской сессии с корректной генерацией переменных окружения.
+
+Переключитесь на целевого пользователя:
+```bash
+machinectl shell forgejo-runner@
+```
+
+Активируйте пользовательский сокет Podman:
+```bash
+systemctl --user enable --now podman.socket
+```
+
+Определите идентификатор пользователя (UID) для последующей конфигурации:
+```bash
+id -u
+```
+*(Зафиксируйте полученное значение, например: `968`).*
+
+---
+
+## Этап 4. Конфигурация и регистрация службы Runner
+
+Все последующие команды выполняются в рамках сессии пользователя `forgejo-runner`.
+
+### 1. Создание конфигурационного файла
+Создайте конфигурацию в домашней директории:
+```bash
+nano config.yaml
+```
+
+Внесите параметры, заменив `968` на актуальный UID:
+```yaml
+runner:
+  capacity: 2
+  labels:
+    - "docker"
+
+container:
+  docker_host: "unix:///run/user/968/podman/podman.sock"
+  options: "--security-opt label=disable"
+```
+
+### 2. Регистрация узла
+1. В веб-интерфейсе Forgejo перейдите в **Администрирование** -> **Действия (Actions)** -> **Раннеры**.
+2. Инициируйте создание нового Runner и скопируйте регистрационный токен.
+3. В консоли ВМ выполните команду регистрации:
+```bash
+forgejo-runner register --config config.yaml --no-interactive --instance https://git.internal.example.com/ --token <ВАШ_ТОКЕН> --name "RUNNER-01"
+```
+Ожидаемый ответ системы: `Runner registered successfully`.
+
+---
+
+## Этап 5. Настройка службы systemd (User Unit)
+
+Для обеспечения автоматического запуска создайте пользовательскую службу.
+
+Создайте директорию и файл конфигурации:
+```bash
+mkdir -p ~/.config/systemd/user
+nano ~/.config/systemd/user/forgejo-runner.service
+```
+
+Структура юнита:
+```ini
+[Unit]
+Description=Forgejo Runner (Rootless Podman)
+After=network.target podman.socket
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=/usr/bin/forgejo-runner daemon --config %h/config.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Примените изменения и запустите службу:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now forgejo-runner
+systemctl --user status forgejo-runner
+```
+В веб-интерфейсе Forgejo статус узла должен измениться на **Idle**.
+
+---
+
+## Примеры использования пайплайнов (CI/CD)
+
+Благодаря конфигурации метки `docker`, инфраструктура поддерживает динамическое развертывание эфемерных контейнеров на базе произвольных образов напрямую из файлов `.forgejo/workflows/build.yaml`.
+
+**Пример 1: Базовое тестирование среды (Alpine Linux):**
+```yaml
+name: CI/CD Pipeline
+on: [push]
+
+jobs:
+  build:
+    runs-on: docker
+    container:
+      image: docker.io/library/alpine:latest
+    steps:
+      - name: System Check
+        run: cat /etc/os-release
+```
+
+**Пример 2: Безопасная сборка с понижением привилегий (Debian):**
+```yaml
+name: Debian Build Pipeline
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  debian-build:
+    runs-on: docker
+    container:
+      image: docker.io/library/debian:bookworm-slim
+      
+    steps:
+      - name: Конфигурация среды (Root)
+        run: |
+          apt-get update
+          apt-get install -y software-properties-common
+          useradd -m -s /bin/bash builduser
+
+      - name: Выполнение задачи (Unprivileged User)
+        run: |
+          su - builduser -c 'echo "Executing build process as $(whoami)"'
+```
+
+
+#  Использование репозитория Forgejo и отправка локального кода
+
+---
+
+## Этап 1. Генерация ключа аутентификации (SSH)
+
+Для безопасного взаимодействия с сервером требуется создание криптографической пары ключей.
+
+1. Откройте терминал на локальной рабочей станции:
+   * **Windows:** PowerShell или Git Bash.
+   * **macOS / Linux:** Terminal.
+2. Выполните команду генерации ключа стандарта `ed25519`, указав актуальный адрес электронной почты:
+   ```bash
+   ssh-keygen -t ed25519 -C "user@example.com"
+   ```
+3. При запросе пути сохранения и парольной фразы (passphrase) нажмите **Enter** три раза для применения параметров по умолчанию.
+4. Выведите содержимое публичного ключа в консоль:
+   * В Linux / macOS / Git Bash:
+     ```bash
+     cat ~/.ssh/id_ed25519.pub
+     ```
+   * В Windows (CMD):
+     ```cmd
+     type .ssh\id_ed25519.pub
+     ```
+5. Скопируйте полученную строку. Формат ключа начинается с `ssh-ed25519` и завершается указанным адресом электронной почты.
+
+---
+
+## Этап 2. Импорт публичного ключа в Forgejo
+
+Необходимо добавить созданный публичный ключ в профиль пользователя на сервере для авторизации соединений.
+
+1. Авторизуйтесь в веб-интерфейсе сервера Forgejo.
+2. В правом верхнем углу откройте меню профиля и перейдите в раздел **Настройки**.
+3. Откройте вкладку **SSH / GPG ключи**.
+4. В блоке "Управление ключами SSH" нажмите кнопку **Добавить ключ**.
+5. В поле **Имя ключа** укажите идентификатор устройства (например, `Workstation-01`).
+6. В поле **Содержимое** вставьте скопированный публичный ключ.
+7. Нажмите **Добавить ключ**.
+
+---
+
+## Этап 3. Инициализация удаленного репозитория
+
+Для приема локальных данных требуется создать пустой репозиторий на стороне сервера.
+
+1. В веб-интерфейсе Forgejo нажмите на символ **(+)** в верхней панели и выберите **Новый репозиторий**.
+2. Введите **Имя репозитория** (например, `project-name`).
+3. **ВАЖНО:** Оставьте неактивными опции блока *«Инициализировать репозиторий»* (не добавляйте `.gitignore`, `README` и лицензию). Репозиторий должен быть пустым во избежание конфликтов истории коммитов.
+4. Нажмите **Создать репозиторий**.
+5. На странице созданного репозитория выберите протокол **SSH** и скопируйте URL. Формат строки:
+   `git@git.example.com:<Имя_Пользователя>/project-name.git`
+
+---
+
+## Этап 4. Отправка (Push) данных на сервер
+
+Процесс привязки локальной директории к удаленному серверу и передачи данных.
+
+1. Откройте терминал и перейдите в рабочую директорию проекта:
+   ```bash
+   cd /путь/к/директории/проекта
+   ```
+2. Инициализируйте локальный Git-репозиторий:
+   ```bash
+   git init
+   ```
+3. Добавьте файлы в индекс и выполните первичный коммит:
+   ```bash
+   git add .
+   git commit -m "Initial commit"
+   ```
+4. Настройте связь локального репозитория с удаленным сервером (remote), используя ранее скопированный SSH URL:
+   ```bash
+   git remote add origin git@git.example.com:<Имя_Пользователя>/project-name.git
+   ```
+5. Переименуйте основную ветку согласно современному стандарту (`main`):
+   ```bash
+   git branch -M main
+   ```
+6. Выполните отправку данных на удаленный сервер:
+   ```bash
+   git push -u origin main
+   ```
+
+*Примечание: При первичном подключении к серверу система запросит подтверждение отпечатка ключа (fingerprint). Введите `yes` и нажмите Enter.*
+
+***

@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# 1. Данные для подключения (те же, что в скрипте бэкапа)
+export PBS_REPOSITORY="pve-node-1@pbs!mytoken@10.0.0.5:8007:mydatastore"
+export PBS_PASSWORD="xxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+NAMESPACE="PVE-Node-1"
+
+# Указываем имя хоста (как оно записано в PBS) и берем ПОСЛЕДНИЙ (last) бэкап
+SNAPSHOT="host/имя_вашего_узла/latest"
+TMP_DIR="/tmp/pve-restore"
+
+echo "Начинаем магию восстановления хоста из PBS..."
+
+# 2. Создаем временную папку
+mkdir -p $TMP_DIR/etc
+mkdir -p $TMP_DIR/pve
+
+# 3. Скачиваем архивы из PBS во временные папки
+echo "Тянем архивы из PBS..."
+proxmox-backup-client restore $SNAPSHOT system-etc.pxar $TMP_DIR/etc --ns $NAMESPACE
+proxmox-backup-client restore $SNAPSHOT proxmox-cluster.pxar $TMP_DIR/pve --ns $NAMESPACE
+
+# 4. Хирургическое восстановление критически важных файлов
+echo "Восстанавливаем сеть и имя хоста..."
+cp $TMP_DIR/etc/network/interfaces /etc/network/interfaces
+cp $TMP_DIR/etc/hostname /etc/hostname
+cp $TMP_DIR/etc/hosts /etc/hosts
+cp $TMP_DIR/etc/resolv.conf /etc/resolv.conf
+
+echo "Восстанавливаем конфигурацию виртуалок и хранилищ (магия pmxcfs)..."
+# Копируем содержимое /etc/pve. Так как служба работает, файлы запишутся в БД корректно
+cp -a $TMP_DIR/pve/* /etc/pve/
+
+# (Опционально) Восстанавливаем ключи SSH, чтобы пускало по старым ключам
+cp -a $TMP_DIR/etc/ssh /etc/
+cp -a $TMP_DIR/etc/pki /etc/ 2>/dev/null
+
+# 5. Уборка
+rm -rf $TMP_DIR
+unset PBS_PASSWORD
+
+echo "====================================================="
+echo "Восстановление успешно завершено! ВСЕ ДАННЫЕ НА МЕСТЕ."
+echo "Пожалуйста, отправьте сервер в перезагрузку: reboot"
+echo "====================================================="
