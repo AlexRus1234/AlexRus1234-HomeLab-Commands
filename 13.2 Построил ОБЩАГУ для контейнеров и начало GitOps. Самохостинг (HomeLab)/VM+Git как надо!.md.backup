@@ -1,0 +1,152 @@
+
+
+---
+
+В этом документе собраны все команды для подготовки виртуальной машины к работе с Rootless Podman и инициализации GitOps-агента.
+
+---
+
+## Этап 1: Базовая подготовка ВМ (от пользователя `root` или через `sudo`)
+
+### 1.1 Обновление ключей и системы (Arch Linux)
+Если вы разворачиваете ВМ из старого шаблона, обязательно обновите ключи шифрования, иначе пакетный менеджер выдаст ошибку.
+```bash
+sudo pacman-key --init
+sudo pacman-key --populate
+sudo pacman -Sy archlinux-keyring --noconfirm
+
+# Устанавливаем reflector для поиска самых быстрых зеркал
+sudo pacman -S reflector --noconfirm
+sudo reflector --country Germany,Russia,Netherlands --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+
+# Полное обновление системы
+sudo pacman -Syu --noconfirm
+```
+
+### 1.2 Форматирование и монтирование диска (Stateless)
+К ВМ должен быть добавлен **один** дополнительный виртуальный диск на 1 ГБ (под Базы Данных).
+```bash
+# Устанавливаем редактор micro (или используйте nano)
+sudo pacman -S micro --noconfirm
+
+# Форматируем диск БД в ext4
+sudo mkfs.ext4 /dev/sdb
+
+# Создаем точку монтирования для БД и папку для конфигов (на диске ОС)
+sudo mkdir -p /opt/appdata/db
+sudo mkdir -p /opt/appdata/config
+
+# Узнаем UUID диска (СКОПИРУЙТЕ ЕГО!)
+sudo blkid /dev/sdb
+```
+
+Добавляем диск в автозагрузку. Обратите внимание на флаг `noatime` — он критически важен для производительности баз данных:
+```bash
+sudo micro /etc/fstab
+```
+*Добавьте в конец файла:*
+```text
+UUID=ваш_uuid_от_sdb  /opt/appdata/db  ext4  defaults,noatime,discard  0  2
+```
+Применяем настройки:
+```bash
+sudo mount -a
+df -h  # Проверяем, что диск примонтирован в /opt/appdata/db
+```
+
+### 1.3 Создание пользователя и настройка безопасности
+```bash
+# Создаем пользователя без прав root для запуска контейнеров
+sudo useradd -m -s /bin/bash app-runner
+
+# Отдаем ему права на всю рабочую директорию
+sudo chown -R app-runner:app-runner /opt/appdata
+
+# Разрешаем системным службам пользователя работать в фоне
+sudo loginctl enable-linger app-runner
+
+# Добавляем корневой сертификат вашего локального CA (чтобы Podman мог скачивать образы по HTTPS)
+sudo micro /etc/ca-certificates/trust-source/anchors/step-ca.crt
+# (Вставьте текст вашего сертификата и сохраните: Ctrl+S, Ctrl+Q)
+
+sudo update-ca-trust
+```
+
+### 1.4 Установка Podman и утилит
+```bash
+sudo pacman -S podman git podlet rsync jq btop --noconfirm
+
+# Перезагружаем ВМ, чтобы ядро корректно подхватило диск и юзера
+sudo reboot
+```
+
+---
+
+## Этап 2: Настройка GitOps-агента (от пользователя `app-runner`)
+
+**ВАЖНО:** Все последующие команды выполняются **только** от пользователя `app-runner`! Подключитесь по SSH под этим пользователем или переключитесь в терминале: `sudo machinectl shell app-runner@`
+
+### 2.1 Подготовка папок для Systemd Quadlets
+```bash
+# Папка для Quadlets
+mkdir -p /opt/appdata/config/quadlets
+
+# Стандартный системный путь для Rootless Podman
+mkdir -p ~/.config/containers
+
+# Создаем ярлык (symlink), чтобы systemd читал файлы из нашей рабочей папки
+ln -s /opt/appdata/config/quadlets ~/.config/containers/systemd
+
+# Активируем сокет Podman (обязательно!)
+systemctl --user enable --now podman.socket
+```
+
+### 2.2 Инициализация Sparse-Checkout (Умное клонирование)
+Мы скачиваем не весь репозиторий, а только папку, относящуюся к этой ВМ.
+```bash
+mkdir -p /opt/appdata/git-repo
+cd /opt/appdata/git-repo
+
+git init
+# ЗАМЕНИТЕ URL НА АДРЕС ВАШЕГО РЕПОЗИТОРИЯ
+git remote add origin https://git.yadr00.internal/AlexRus/homelab-deploy.git
+
+git config core.sparseCheckout true
+
+# Указываем Git'у стягивать только папку этой ВМ
+echo "servers/yadr00/obshaga/*" >> .git/info/sparse-checkout
+
+# Стягиваем файлы
+git pull origin main
+```
+
+### 2.3 Ручной запуск синхронизации (Первый старт)
+После успешного `git pull` у вас на диске появится скрипт `sync-state.sh`. Запустите его, чтобы применить конфигурации и запустить контейнеры:
+
+```bash
+# Делаем скрипт исполняемым
+chmod +x /opt/appdata/git-repo/servers/yadr00/obshaga/sync-state.sh
+
+# Запускаем синхронизацию
+/opt/appdata/git-repo/servers/yadr00/obshaga/sync-state.sh
+```
+
+---
+
+## Этап 3: Дебаг и Управление контейнерами
+
+Если скрипт отработал, вы можете проверять статус ваших контейнеров стандартными командами Linux:
+
+```bash
+# Проверить статус службы (замените 02-dashy на имя вашего сервиса)
+systemctl --user status 02-dashy
+
+# Посмотреть логи контейнера в реальном времени
+journalctl --user -fu 02-dashy
+
+# Если служба выдает "Unit not found" — проверьте логи генератора Quadlets:
+journalctl --user -xeu systemd-generator
+
+# Вручную проверить наличие обновлений образов в реестре
+podman auto-update --dry-run
+```
