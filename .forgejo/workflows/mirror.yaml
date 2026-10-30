@@ -11,8 +11,10 @@ jobs:
   sync-mirrors:
     runs-on: docker
     container:
-      # Используем сверхлегкий контейнер с Git
-      image: docker.io/alpine/git:latest
+      # Сверхлегкий контейнер с Git. Берем из локального зеркала NORA, а не с Docker Hub:
+      # в октябре 2026 Cloudflare-хосты Docker Hub (auth.docker.io, production.cloudflare.docker.com)
+      # на домашнем канале не отвечают, pull падает с "net/http: TLS handshake timeout".
+      image: nora.panelka.yadr01.internal/alpine/git:latest
     
     steps:
       - name: Настройка безопасности и клонирование
